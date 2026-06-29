@@ -48,53 +48,36 @@ export async function detectWeiboUser() {
       const html = await response.text()
 
       // 从 HTML 中提取用户名
-      // 页面中 JSON 以 \uXXXX 转义存储（如 "nick":"A\u5c0f\u7801\u54e5"），
-      // 正则捕获的是字面字符串，需用 JSON.parse 解码 Unicode 转义
-      const nickMatch = html.match(/"nick"\s*:\s*"([^"]+)"/)
+      // 页面中 JSON 以 \uXXXX 转义存储（如 "nick":"A\u5c0f"），
+      // 使用正则匹配并解码 Unicode 转义序列
+      const nickMatch = html.match(/"nick"\s*:\s*"((?:[^"\\]|\\.)*)"/)
       if (nickMatch) {
-        try {
-          username = JSON.parse(`"${nickMatch[1]}"`)
-        } catch (e) {
-          username = nickMatch[1]
-        }
+        // 解码 \uXXXX 转义序列为实际字符
+        username = nickMatch[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+          String.fromCharCode(parseInt(hex, 16))
+        )
       } else {
         // 深度查找 nick（双重转义的情况）
         const altNickMatch = html.match(/\\"nick\\"\s*:\s*\\"([^\\"]+)\\"/)
         if (altNickMatch) {
-          try {
-            username = JSON.parse(`"${altNickMatch[1]}"`)
-          } catch (e) {
-            username = altNickMatch[1]
-          }
+          username = altNickMatch[1].replace(/\\u([0-9a-fA-F]{4})/g, (_, hex) =>
+            String.fromCharCode(parseInt(hex, 16))
+          )
         }
       }
 
       // 从 HTML 中提取头像
-      // 头像 URL 中的 \/ 是 JSON 转义的斜杠，同样用 JSON.parse 解码
       const avatarMatch = html.match(/"avatar_large"\s*:\s*"([^"]+)"/)
       if (avatarMatch) {
-        try {
-          avatar = JSON.parse(`"${avatarMatch[1]}"`)
-        } catch (e) {
-          avatar = avatarMatch[1].replace(/\\\//g, '/')
-        }
+        avatar = avatarMatch[1].replace(/\\/g, '')
       } else {
         const altAvatarMatch = html.match(/\\"avatar_large\\"\s*:\s*\\"([^\\"]+)\\"/)
         if (altAvatarMatch) {
-          try {
-            let rawAvatar = JSON.parse(`"${altAvatarMatch[1]}"`)
-            if (rawAvatar.includes('sinaimg.cn')) {
-              avatar = rawAvatar.split('?')[0]
-            } else {
-              avatar = rawAvatar
-            }
-          } catch (e) {
-            let rawAvatar = altAvatarMatch[1].replace(/\\\\\\\//g, '/')
-            if (rawAvatar.includes('sinaimg.cn')) {
-              avatar = rawAvatar.split('?')[0]
-            } else {
-              avatar = rawAvatar
-            }
+          let rawAvatar = altAvatarMatch[1].replace(/\\\\\\\//g, '/')
+          if (rawAvatar.includes('sinaimg.cn')) {
+            avatar = rawAvatar.split('?')[0]
+          } else {
+            avatar = rawAvatar
           }
         }
       }
