@@ -489,6 +489,7 @@
 
         // 检查是否需要同步到微信公众号或百家号或网易号或 Medium 或少数派或B站专栏或微博头条或小红书（需要使用剪贴板 HTML）
         const hasWechat = syncAccounts.some(a => (a.uid || a.type) === 'wechat')
+        const hasToutiao = syncAccounts.some(a => (a.uid || a.type) === 'toutiao')
         const hasBaijiahao = syncAccounts.some(a => (a.uid || a.type) === 'baijiahao')
         const hasWangyihao = syncAccounts.some(a => (a.uid || a.type) === 'wangyihao')
         const hasMedium = syncAccounts.some(a => (a.uid || a.type) === 'medium')
@@ -499,6 +500,7 @@
         let clipboardHtmlContent = null
         if (
           hasWechat ||
+          hasToutiao ||
           hasBaijiahao ||
           hasWangyihao ||
           hasMedium ||
@@ -553,9 +555,12 @@
                 markdown: post.markdown,
                 thumb: post.thumb,
                 desc: post.desc,
-                // 微信公众号、百家号、网易号、Medium、少数派、B站专栏、微博头条和小红书使用剪贴板中带样式的 HTML
+                contentType: post.contentType || 'article',
+                url: post.url,
+                // 微信公众号、头条、百家号、网易号、Medium、少数派、B站专栏、微博头条和小红书使用剪贴板中带样式的 HTML
                 wechatHtml:
                   platformId === 'wechat' ||
+                  platformId === 'toutiao' ||
                   platformId === 'baijiahao' ||
                   platformId === 'wangyihao' ||
                   platformId === 'medium' ||
@@ -582,6 +587,14 @@
           }
 
           if (typeof onProgress === 'function') onProgress({ ...status })
+        }
+
+        // 所有平台同步完成后，把本批标签一次性收进同一个标签组
+        // （放在循环外，避免分组与 tabs.create 交错锁住标签栏）
+        try {
+          await sendMessage('FINISH_SYNC_BATCH', {})
+        } catch (e) {
+          console.log('[COSE] 同步标签分组失败:', e.message)
         }
 
         if (typeof onComplete === 'function') onComplete()

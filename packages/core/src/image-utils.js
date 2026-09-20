@@ -134,7 +134,9 @@ function getFilenameFromUrl(url) {
  * @param {Set<string>} skipUrls - 跳过已有缓存的 URL
  */
 async function downloadAllImages(content, concurrency = 3, skipUrls = new Set()) {
-  const imageUrls = extractAllImageUrls(content).filter(url => !url.startsWith('data:') && !skipUrls.has(url))
+  const imageUrls = extractAllImageUrls(content).filter(
+    url => !url.startsWith('data:') && !skipUrls.has(url)
+  )
   const cache = new Map()
 
   if (imageUrls.length === 0) {
@@ -147,10 +149,12 @@ async function downloadAllImages(content, concurrency = 3, skipUrls = new Set())
   for (let i = 0; i < imageUrls.length; i += concurrency) {
     const batch = imageUrls.slice(i, i + concurrency)
     const results = await Promise.allSettled(
-      batch.map(async (url) => {
+      batch.map(async url => {
         try {
           const result = await downloadImage(url)
-          console.log(`[COSE] 已下载: ${result.filename} (${(result.blob.size / 1024).toFixed(1)}KB)`)
+          console.log(
+            `[COSE] 已下载: ${result.filename} (${(result.blob.size / 1024).toFixed(1)}KB)`
+          )
           return { url, result }
         } catch (err) {
           console.warn(`[COSE] 下载失败 ${url}: ${err.message}`)
@@ -222,14 +226,17 @@ async function replaceImagesViaPasteInPage(imageCache) {
     let node = el
     while (node && node !== document.body) {
       if (node.contentEditable === 'true') return node
-      if (node.tagName === 'TEXTAREA' || (node.tagName === 'INPUT' && node.type === 'text')) return node
+      if (node.tagName === 'TEXTAREA' || (node.tagName === 'INPUT' && node.type === 'text'))
+        return node
       node = node.parentElement
     }
-    return document.querySelector('.ProseMirror') ||
+    return (
+      document.querySelector('.ProseMirror') ||
       document.querySelector('[contenteditable="true"]') ||
       document.querySelector('.DraftEditor-root') ||
       document.querySelector('.public-DraftEditor-content') ||
       null
+    )
   }
 
   function dataUrlToFile(dataUrl, filename) {
@@ -253,7 +260,7 @@ async function replaceImagesViaPasteInPage(imageCache) {
   }
 
   function waitForNewPlatformImage(editor, originalSrc, timeout = 15000) {
-    return new Promise((resolve) => {
+    return new Promise(resolve => {
       const startTime = Date.now()
       const check = () => {
         const imgs = editor.querySelectorAll('img')
@@ -273,7 +280,9 @@ async function replaceImagesViaPasteInPage(imageCache) {
     })
   }
 
-  const initialImages = Array.from(document.querySelectorAll('img')).filter(img => isExternalUrl(img.src))
+  const initialImages = Array.from(document.querySelectorAll('img')).filter(img =>
+    isExternalUrl(img.src)
+  )
   results.total = initialImages.length
 
   if (initialImages.length === 0) {
@@ -287,7 +296,9 @@ async function replaceImagesViaPasteInPage(imageCache) {
   let processedCount = 0
 
   while (processedCount < results.total) {
-    const currentImages = Array.from(document.querySelectorAll('img')).filter(img => isExternalUrl(img.src))
+    const currentImages = Array.from(document.querySelectorAll('img')).filter(img =>
+      isExternalUrl(img.src)
+    )
     const img = currentImages.find(i => !processedSrcs.has(i.src))
 
     if (!img) {
@@ -339,7 +350,9 @@ async function replaceImagesViaPasteInPage(imageCache) {
 
       const newUrl = await waitForNewPlatformImage(editor, originalSrc, 20000)
       if (newUrl) {
-        console.log(`[COSE] 图片已替换: ${originalSrc.substring(0, 60)}... → ${newUrl.substring(0, 60)}...`)
+        console.log(
+          `[COSE] 图片已替换: ${originalSrc.substring(0, 60)}... → ${newUrl.substring(0, 60)}...`
+        )
         results.replaced++
       } else {
         const stillExists = document.contains(img)
@@ -362,7 +375,9 @@ async function replaceImagesViaPasteInPage(imageCache) {
     await new Promise(resolve => setTimeout(resolve, 500))
   }
 
-  console.log(`[COSE] 图片粘贴替换完成: ${results.replaced}/${results.total} 成功, ${results.failed} 失败`)
+  console.log(
+    `[COSE] 图片粘贴替换完成: ${results.replaced}/${results.total} 成功, ${results.failed} 失败`
+  )
   return results
 }
 

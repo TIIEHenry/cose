@@ -1,5 +1,43 @@
 // 平台配置
-import { PLATFORMS, LOGIN_CHECK_CONFIG, SYNC_HANDLERS } from '@cose/core/src/platforms/index.js'
+import {
+  PLATFORMS,
+  LOGIN_CHECK_CONFIG,
+  SYNC_HANDLERS,
+  SYNC_HANDLERS_BY_TYPE,
+  OPINION_CAPABLE_PLATFORMS,
+} from '@cose/core/src/platforms/index.js'
+import { downloadAllImages, serializeImageCache } from '@cose/core/src/image-utils.js'
+
+// ===== 标签栏忙重试 =====
+// Chrome 在标签栏处于动画/拖拽态时会对 tabs.create / tabs.group 等抛出
+// "Tabs cannot be edited right now (user may be dragging a tab)."。
+// 这种状态最常出现在 chrome.tabs.group() 之后、或短时间内连续创建多个后台
+// 标签页时（多平台同步、"重试全部" 时尤其明显）。短暂延迟后重试即可恢复。
+function isTabStripBusyError(error) {
+  const msg = (error && error.message) || String(error || '')
+  return /Tabs cannot be edited right now|user may be dragging a tab/i.test(msg)
+}
+
+async function withTabStripRetry(fn, { retries = 6, delayMs = 350, label = 'tab op' } = {}) {
+  let lastError
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn()
+    } catch (error) {
+      lastError = error
+      if (!isTabStripBusyError(error)) throw error
+      console.warn(`[COSE] ${label} 标签栏忙，第 ${attempt + 1}/${retries} 次重试`)
+      await new Promise(resolve => setTimeout(resolve, delayMs * (attempt + 1)))
+    }
+  }
+  throw lastError
+}
+
+// 创建标签页（带标签栏忙重试）
+function createTabSafe(props) {
+  return withTabStripRetry(() => chrome.tabs.create(props), { label: 'tabs.create' })
+}
+
 import { qianfanIntercept } from '@cose/core/src/platforms/qianfan.js'
 import { convertAvatarToBase64 } from '@cose/detection/src/utils.js'
 // [DISABLED] import { fillAlipayOpenContent } from '@cose/core/src/platforms/alipayopen.js'
@@ -138,7 +176,7 @@ async function tabContextFetch(siteUrl, apiUrl, options = {}) {
 
     if (!tab) {
       // Create a background tab (not active, for other platforms that need it)
-      const newTab = await chrome.tabs.create({ url: siteUrl, active: false })
+      const newTab = await createTabSafe({ url: siteUrl, active: false })
       tab = newTab
       createdTabId = tab.id
       console.log(`[COSE] tabContextFetch: created background tab ${tab.id}`)
@@ -367,51 +405,50 @@ chrome.runtime.onStartup.addListener(() => {
   initDynamicRules()
 })
 
-// 当前同步任务的 Tab Group ID
-let currentSyncGroupId = null
 // 存储平台用户信息
 const PLATFORM_USER_INFO = {}
 
-// 获取或创建同步标签组
-async function getOrCreateSyncGroup(windowId) {
-  // 如果已有 group 且仍然有效，直接返回
-  if (currentSyncGroupId !== null) {
-    try {
-      const groups = await chrome.tabGroups.query({ windowId })
-      const existingGroup = groups.find(g => g.id === currentSyncGroupId)
-      if (existingGroup) {
-        return currentSyncGroupId
-      }
-    } catch (e) {
-      // Group 不存在，需要创建新的
-    }
-  }
+// 本批次创建的同步标签页 id（用于结束时一次性分组）
+let syncBatchTabIds = []
 
-  // 创建新的标签组（先创建一个空组是不行的，需要先有 tab）
-  currentSyncGroupId = null
-  return null
+// 收集本批次创建的同步标签页（只收集 id，不立即分组，避免交错创建导致 Chrome 标签栏死锁）
+async function addTabToSyncGroup(tabId) {
+  if (tabId != null && !syncBatchTabIds.includes(tabId)) {
+    syncBatchTabIds.push(tabId)
+  }
 }
 
-// 将标签添加到同步组
-async function addTabToSyncGroup(tabId, windowId) {
-  try {
-    if (currentSyncGroupId === null) {
-      // 创建新组
-      currentSyncGroupId = await chrome.tabs.group({ tabIds: tabId })
-      // 设置组的样式，使用时间戳作为标题
-      const now = new Date()
-      const timestamp = `${now.getMonth() + 1}/${now.getDate()} ${now.getHours()}:${String(now.getMinutes()).padStart(2, '0')}:${String(now.getSeconds()).padStart(2, '0')}`
-      await chrome.tabGroups.update(currentSyncGroupId, {
-        title: `${timestamp}`,
-        color: 'blue',
-        collapsed: false,
-      })
-    } else {
-      // 添加到现有组
-      await chrome.tabs.group({ tabIds: tabId, groupId: currentSyncGroupId })
+// 批次结束：把本批所有同步标签一次性收进一个标签组（视觉聚合，失败不影响同步）
+async function finishSyncBatch() {
+  if (syncBatchTabIds.length === 0) return
+  const aliveIds = []
+  for (const id of syncBatchTabIds) {
+    try {
+      await chrome.tabs.get(id)
+      aliveIds.push(id)
+    } catch (e) {
+      // 标签已不存在，跳过
     }
+  }
+  syncBatchTabIds = []
+  if (aliveIds.length === 0) return
+
+  try {
+    const groupId = await withTabStripRetry(() => chrome.tabs.group({ tabIds: aliveIds }), {
+      label: 'tabs.group(batch)',
+    })
+    try {
+      await chrome.tabGroups.update(groupId, {
+        title: '同步',
+        color: 'blue',
+      })
+    } catch (e) {
+      // 样式失败不影响使用
+    }
+    await new Promise(resolve => setTimeout(resolve, 150))
+    console.log(`[COSE] 本批同步标签已合并到分组: ${groupId}, 标签数: ${aliveIds.length}`)
   } catch (error) {
-    console.error('[COSE] 添加标签到组失败:', error)
+    console.warn('[COSE] 本批同步标签分组失败 (非致命):', error.message)
   }
 }
 
@@ -472,7 +509,10 @@ async function handleMessage(request, sender) {
       return { started: true, total: (request.platforms || PLATFORMS).length }
     case 'START_SYNC_BATCH':
       // 开始新的同步批次，重置 tab group
-      currentSyncGroupId = null
+      syncBatchTabIds = []
+      return { success: true }
+    case 'FINISH_SYNC_BATCH':
+      await finishSyncBatch()
       return { success: true }
     case 'SYNC_TO_PLATFORM':
       return await syncToPlatform(request.platformId, request.content)
@@ -675,6 +715,27 @@ async function pasteWithDebugger(tabId) {
   }
 }
 
+// 观点 / 文章 / 小册 / 项目统一走各平台文章编辑器填充；
+// booklet / project 若页面没给正文，则由 desc + url 组装成链接帖兜底
+function normalizeContentForType(content) {
+  const contentType = content?.contentType || 'article'
+  if (contentType === 'article' || !content) return content
+
+  if (!content.markdown && !content.body) {
+    const parts = [content.title, content.desc, content.url].filter(Boolean)
+    content.markdown = parts.join('\n\n')
+    content.body = parts
+      .map(p => `<p>${String(p).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`)
+      .join('')
+  } else if (!content.body && content.markdown) {
+    content.body = content.markdown
+      .split(/\n{2,}/)
+      .map(p => `<p>${String(p).replace(/</g, '&lt;').replace(/>/g, '&gt;')}</p>`)
+      .join('')
+  }
+  return content
+}
+
 // 同步到平台
 async function syncToPlatform(platformId, content) {
   const platform = PLATFORMS.find(p => p && p.id === platformId)
@@ -682,8 +743,45 @@ async function syncToPlatform(platformId, content) {
     return { success: false, message: '暂不支持该平台' }
   }
 
+  const contentType = content?.contentType || 'article'
+  if (contentType === 'opinion' && !OPINION_CAPABLE_PLATFORMS.has(platformId)) {
+    return {
+      success: false,
+      message: `${platform.title || platformId} 仅支持长文章入口，暂不支持短观点直发`,
+    }
+  }
+  content = normalizeContentForType(content)
+
+  // 预下载所有外部图片，供平台（如头条）本地直传使用
+  const serializedImageCache = {}
+  try {
+    const imageCache = await downloadAllImages(content, 3)
+    if (imageCache && imageCache.size > 0) {
+      Object.assign(serializedImageCache, await serializeImageCache(imageCache))
+    }
+  } catch (err) {
+    console.warn('[COSE] 预下载图片失败 (非致命):', err.message)
+  }
+
   try {
     let tab
+
+    // 优先：按内容类型路由的处理器（如观点 → 微博发布框 / 掘金沸点 / 知乎想法）
+    const typeHandler = SYNC_HANDLERS_BY_TYPE[contentType]?.[platformId]
+    if (typeHandler) {
+      console.log(`[COSE] 使用 ${platformId} 的 ${contentType} 类型处理器`)
+      tab = await createTabSafe({ url: typeHandler.entryUrl || platform.publishUrl, active: false })
+      await addTabToSyncGroup(tab.id)
+      await waitForTab(tab.id)
+      const helpers = {
+        chrome,
+        waitForTab,
+        addTabToSyncGroup,
+        PLATFORMS,
+        imageCache: serializedImageCache,
+      }
+      return await typeHandler.sync(tab, content, helpers)
+    }
 
     // 检查是否有平台特定的同步处理器
     const syncHandler = SYNC_HANDLERS[platformId]
@@ -691,8 +789,8 @@ async function syncToPlatform(platformId, content) {
       console.log(`[COSE] 使用 ${platformId} 平台特定同步处理器`)
       // 创建新标签页（对于微信等需要特殊处理的平台，使用首页）
       const initialUrl = platformId === 'wechat' ? 'https://mp.weixin.qq.com/' : platform.publishUrl
-      tab = await chrome.tabs.create({ url: initialUrl, active: false })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: initialUrl, active: false })
+      await addTabToSyncGroup(tab.id)
 
       // 调用平台特定处理器
       const helpers = {
@@ -700,6 +798,7 @@ async function syncToPlatform(platformId, content) {
         waitForTab,
         addTabToSyncGroup,
         PLATFORMS,
+        imageCache: serializedImageCache,
       }
       return await syncHandler(tab, content, helpers)
     }
@@ -725,8 +824,8 @@ async function syncToPlatform(platformId, content) {
           const targetUrl = `https://xie.infoq.cn/draft/${draftId}`
           console.log('[COSE] InfoQ 创建草稿成功，ID:', draftId)
 
-          tab = await chrome.tabs.create({ url: targetUrl, active: false })
-          await addTabToSyncGroup(tab.id, tab.windowId)
+          tab = await createTabSafe({ url: targetUrl, active: false })
+          await addTabToSyncGroup(tab.id)
           await waitForTab(tab.id)
         } else {
           console.error('[COSE] InfoQ 创建草稿失败:', data)
@@ -778,8 +877,8 @@ async function syncToPlatform(platformId, content) {
           const targetUrl = `https://www.jianshu.com/writer#/notebooks/${notebookId}/notes/${noteId}`
           console.log('[COSE] 简书创建文章成功，ID:', noteId)
 
-          tab = await chrome.tabs.create({ url: targetUrl, active: false })
-          await addTabToSyncGroup(tab.id, tab.windowId)
+          tab = await createTabSafe({ url: targetUrl, active: false })
+          await addTabToSyncGroup(tab.id)
           await waitForTab(tab.id)
         } else {
           console.error('[COSE] 简书创建文章失败:', noteData)
@@ -794,8 +893,8 @@ async function syncToPlatform(platformId, content) {
       console.log('[COSE] 开始处理小红书同步...')
 
       // 打开发布页面
-      tab = await chrome.tabs.create({ url: platform.publishUrl, active: false })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: platform.publishUrl, active: false })
+      await addTabToSyncGroup(tab.id)
       await waitForTab(tab.id)
 
       // 等待页面加载完成
@@ -983,8 +1082,8 @@ async function syncToPlatform(platformId, content) {
       const [currentTab] = await chrome.tabs.query({ active: true, currentWindow: true })
 
       // 第一步：打开草稿列表页（激活状态，触发编辑器渲染）
-      tab = await chrome.tabs.create({ url: platform.publishUrl, active: true })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: platform.publishUrl, active: true })
+      await addTabToSyncGroup(tab.id)
       await waitForTab(tab.id)
 
       // 等待页面加载
@@ -1368,8 +1467,8 @@ async function syncToPlatform(platformId, content) {
       }
 
       // 打开发布页面
-      tab = await chrome.tabs.create({ url: platform.publishUrl, active: false })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: platform.publishUrl, active: false })
+      await addTabToSyncGroup(tab.id)
 
       // 动态注入千帆拦截脚本（MAIN world，尽早执行）
       try {
@@ -1519,8 +1618,8 @@ async function syncToPlatform(platformId, content) {
     /* [DISABLED] 支付宝开放平台：使用 ne-engine 富文本编辑器，支持 Markdown 转换
     if (platformId === 'alipayopen') {
       // 先打开发布页面
-      tab = await chrome.tabs.create({ url: platform.publishUrl, active: false })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: platform.publishUrl, active: false })
+      await addTabToSyncGroup(tab.id)
       await waitForTab(tab.id)
 
       // 等待页面加载
@@ -1561,15 +1660,19 @@ async function syncToPlatform(platformId, content) {
       }
 
       // 直接打开发布页面
-      tab = await chrome.tabs.create({ url: targetUrl, active: false })
-      await addTabToSyncGroup(tab.id, tab.windowId)
+      tab = await createTabSafe({ url: targetUrl, active: false })
+      await addTabToSyncGroup(tab.id)
       await waitForTab(tab.id)
     }
 
     // 微信公众号：直接注入 HTML 到编辑器
     if (platformId === 'wechat') {
       // 使用剪贴板 HTML（带完整样式）或降级到 body
-      const htmlContent = content.wechatHtml || content.body
+      let htmlContent = content.wechatHtml || content.body
+      if (htmlContent) {
+        htmlContent = htmlContent.replace(/<li[^>]*>\s*•\s/g, '<li>')
+        htmlContent = htmlContent.replace(/<li[^>]*>\s*\d+\.\s/g, '<li>')
+      }
       console.log('[COSE] 微信 HTML 内容长度:', htmlContent?.length || 0)
 
       // 等待额外时间确保编辑器完全加载

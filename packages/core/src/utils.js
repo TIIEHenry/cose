@@ -83,7 +83,7 @@ function injectCommonUtils() {
   }
 
   // 解析 Markdown 为 text/image 交替片段（含 alt 文本）
-  window.parseMarkdownSegments = (markdown) => {
+  window.parseMarkdownSegments = markdown => {
     if (!markdown) return []
     const segments = []
     const regex = /\!\[([^\]]*)\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
@@ -114,7 +114,9 @@ function injectCommonUtils() {
     dt.setData('text/html', injectHtml)
     dt.setData('text/plain', injectHtml.replace(/<[^>]*>/g, ''))
     const pasteEvent = new ClipboardEvent('paste', {
-      bubbles: true, cancelable: true, clipboardData: dt,
+      bubbles: true,
+      cancelable: true,
+      clipboardData: dt,
     })
     editor.dispatchEvent(pasteEvent)
     await new Promise(r => setTimeout(r, 500))
@@ -136,11 +138,11 @@ function injectCommonUtils() {
   }
 
   // 从 HTML 中剥离图片标签，替换为文本占位符
-  window.stripImagesFromHtml = (html) => {
+  window.stripImagesFromHtml = html => {
     if (!html) return { strippedHtml: html, images: [] }
     const images = []
     let idx = 0
-    const strippedHtml = html.replace(/<img[^>]*>/gi, (match) => {
+    const strippedHtml = html.replace(/<img[^>]*>/gi, match => {
       const srcMatch = match.match(/src=["']([^"']+)["']/i)
       const altMatch = match.match(/alt=["']([^"']*)["']/i)
       const src = srcMatch ? srcMatch[1] : ''
