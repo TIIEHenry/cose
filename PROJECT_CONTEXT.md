@@ -114,13 +114,14 @@ background.js
 - CSDN
 - 掘金
 - 微信公众号
-- 知乎
+- 知乎。解析弹窗把正文写进草稿、编辑器仍是空的时，按稿件 id 打开 `https://zhuanlan.zhihu.com/p/{id}/edit`。没弹出解析框时，不再先清空编辑器，改用 `insertText` 写入正文。
 - 今日头条
 - 网易号
+- 腾讯云。写文章页是 `https://cloud.tencent.com/developer/article/write`。先切到 Markdown，再写入 Cherry 的 CodeMirror 6（`.cm-content` 上的编辑器视图）。旧页仍尝试 CodeMirror 5 和 Monaco。找不到编辑器，或读回的正文对不上，就返回失败。
 
 ### 通用内容填充器
 
-一些平台在独立文件中提供 `fillXxxContent`，由后台注入执行，例如博客园、51CTO、InfoQ、简书、Medium、少数派、思否、腾讯云、阿里云和百家号。
+一些平台在独立文件中提供 `fillXxxContent`，由后台注入执行，例如博客园、51CTO、InfoQ、简书、Medium、少数派、思否、阿里云和百家号。
 
 这些填充器通常通过以下方式适配 React、Vue 和富文本编辑器：
 

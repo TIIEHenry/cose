@@ -4,147 +4,311 @@ const TencentCloudPlatform = {
   name: 'TencentCloud',
   icon: 'https://cloudcache.tencent-cloud.com/qcloud/favicon.ico',
   url: 'https://cloud.tencent.com/developer',
-  publishUrl: 'https://cloud.tencent.com/developer/article/write-new',
+  publishUrl: 'https://cloud.tencent.com/developer/article/write',
   title: '腾讯云开发者社区',
   type: 'tencentcloud',
 }
 
-/**
- * 检查当前是否需要切换到 MD 编辑器
- * 判断依据：页面中是否存在"切换 MD 编辑器"的按钮
- * - 如果存在，说明当前是富文本编辑器，需要切换
- * - 如果不存在（显示"切换 富文本 编辑器"），说明已经是 MD 编辑器
- * @returns {HTMLElement|null} 返回切换按钮元素，如果已经是 MD 编辑器则返回 null
- */
-function findSwitchToMDButton() {
-  const headerBtns = document.querySelectorAll('.header-btn')
-  for (const btn of headerBtns) {
-    // 只有当按钮文本包含"MD"时才需要切换（说明当前是富文本编辑器）
-    // 如果按钮文本包含"富文本"，说明已经是 MD 编辑器，不需要切换
-    if (btn.textContent.includes('切换') && btn.textContent.includes('MD')) {
-      return btn
-    }
+/** True when this control switches the rich-text editor into Markdown. */
+export function isTencentSwitchToMarkdown(text, className = '') {
+  const value = String(text || '').replace(/\s+/g, '')
+  if (value.includes('富文本')) return false
+  if (
+    value.includes('切换') &&
+    (value.includes('MD') || value.toLowerCase().includes('markdown'))
+  ) {
+    return true
   }
+  const cls = String(className || '')
+  return cls.includes('switch-editor') && value.length <= 40
+}
+
+/** The editor accepted the article when a prefix of the source is present. */
+export function tencentEditorFilled(actual, expected) {
+  const got = String(actual || '').replace(/\s+/g, '')
+  const want = String(expected || '').replace(/\s+/g, '')
+  if (!want) return true
+  if (!got) return false
+  return got.includes(want.slice(0, Math.min(48, want.length)))
+}
+
+/** CodeMirror 6 view hanging off `.cm-content` or `.cm-editor`. */
+export function tencentCodeMirror6View(node) {
+  const attached = node?.cmView
+  if (attached?.dispatch && attached?.state?.doc) return attached
+  const view = attached?.rootView?.view || attached?.view || attached?.root?.view || null
+  if (view?.dispatch && view?.state?.doc) return view
   return null
 }
 
 /**
- * 确保编辑器处于 Markdown 模式
- * 1. 检查是否有"切换 MD 编辑器"按钮
- * 2. 如果有，点击切换到 MD 编辑器
- * 3. 如果没有，说明已经是 MD 编辑器
- * @returns {Promise<boolean>} 是否成功进入 MD 编辑器模式
+ * 在腾讯云写文章页主世界填充标题和 Markdown。
+ * 函数会整段注入页面，不能引用本模块的其它函数。
+ * 当前编辑器是 Cherry Markdown（CodeMirror 6，`.cm-content`）。
+ * 旧页仍可能是 CodeMirror 5 或 Monaco。
  */
-async function ensureMarkdownEditor() {
-  // 等待页面加载完成
-  await new Promise(resolve => setTimeout(resolve, 1000))
+async function fillTencentCloudContent(title, markdown) {
+  const contentToFill = markdown || ''
 
-  const switchBtn = findSwitchToMDButton()
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms))
+  }
 
-  if (switchBtn) {
-    // 找到了"切换 MD 编辑器"按钮，说明当前是富文本编辑器，需要切换
-    console.log('[COSE] TencentCloud 检测到富文本编辑器，正在切换到 MD 编辑器...')
-    switchBtn.click()
+  function compact(text) {
+    return String(text || '').replace(/\s+/g, '')
+  }
 
-    // 等待切换完成
-    await new Promise(resolve => setTimeout(resolve, 1500))
-
-    // 验证切换是否成功：检查 CodeMirror 是否存在
-    const cm = document.querySelector('.CodeMirror')
-    if (cm && cm.CodeMirror) {
-      console.log('[COSE] TencentCloud 成功切换到 MD 编辑器')
+  function isSwitch(el) {
+    const text = compact(el.textContent)
+    if (text.includes('富文本')) return false
+    if (text.length > 40) return false
+    if (text.includes('切换') && (text.includes('MD') || text.toLowerCase().includes('markdown'))) {
       return true
     }
+    const cls = typeof el.className === 'string' ? el.className : ''
+    return cls.includes('switch-editor')
+  }
 
-    // 如果 CodeMirror 还没加载，再等待一下
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    const cmRetry = document.querySelector('.CodeMirror')
-    if (cmRetry && cmRetry.CodeMirror) {
-      console.log('[COSE] TencentCloud 成功切换到 MD 编辑器（延迟加载）')
-      return true
+  function cm6From(node) {
+    const attached = node?.cmView
+    if (attached?.dispatch && attached?.state?.doc) return attached
+    const view = attached?.rootView?.view || attached?.view || attached?.root?.view || null
+    if (view?.dispatch && view?.state?.doc) return view
+    return null
+  }
+
+  function findCm6() {
+    for (const node of document.querySelectorAll('.cm-content, .cm-editor')) {
+      const view = cm6From(node)
+      if (view) return view
     }
-
-    console.error('[COSE] TencentCloud 切换失败：CodeMirror 未加载')
-    return false
-  } else {
-    // 没有找到"切换 MD 编辑器"按钮，说明已经是 MD 编辑器
-    console.log('[COSE] TencentCloud 当前已是 MD 编辑器')
-
-    // 验证 CodeMirror 是否存在
-    const cm = document.querySelector('.CodeMirror')
-    if (cm && cm.CodeMirror) {
-      return true
-    }
-
-    // 等待 CodeMirror 加载
-    await new Promise(resolve => setTimeout(resolve, 1000))
-    const cmRetry = document.querySelector('.CodeMirror')
-    return !!(cmRetry && cmRetry.CodeMirror)
-  }
-}
-
-/**
- * 获取 CodeMirror 实例
- * @param {number} maxWait 最大等待时间（毫秒）
- * @returns {Promise<CodeMirror|null>}
- */
-async function getCodeMirror(maxWait = 3000) {
-  const startTime = Date.now()
-  while (Date.now() - startTime < maxWait) {
-    const cm = document.querySelector('.CodeMirror')
-    if (cm && cm.CodeMirror) {
-      return cm.CodeMirror
-    }
-    await new Promise(resolve => setTimeout(resolve, 200))
-  }
-  return null
-}
-
-/**
- * 腾讯云内容填充函数
- * 流程：
- * 1. 确保进入 MD 编辑器模式
- * 2. 填充标题
- * 3. 填充内容到 CodeMirror
- */
-async function fillTencentCloudContent(content, waitFor, setInputValue) {
-  const { title, body, markdown } = content
-  const contentToFill = markdown || body || ''
-
-  console.log('[COSE] TencentCloud 开始同步...')
-
-  // 第一步：确保进入 MD 编辑器模式
-  const isMarkdownMode = await ensureMarkdownEditor()
-  if (!isMarkdownMode) {
-    console.error('[COSE] TencentCloud 错误：无法进入 MD 编辑器模式，请手动切换后重试')
-    return
+    return null
   }
 
-  // 第二步：获取 CodeMirror 实例
-  const codeMirror = await getCodeMirror(3000)
-  if (!codeMirror) {
-    console.error('[COSE] TencentCloud 错误：CodeMirror 未加载，请刷新页面后重试')
-    return
+  function findCm5() {
+    const el = document.querySelector('.CodeMirror')
+    return el?.CodeMirror?.setValue ? el.CodeMirror : null
   }
 
-  // 第三步：填充标题
-  const titleInput = document.querySelector('textarea[placeholder*="标题"]')
-  if (titleInput && title) {
+  function findMonaco() {
+    const models = window.monaco?.editor?.getModels?.() || []
+    return (
+      models.find(model => String(model.getLanguageId?.() || '').includes('markdown')) ||
+      models[0] ||
+      null
+    )
+  }
+
+  function readBody() {
+    const cm6 = findCm6()
+    if (cm6) return cm6.state.doc.toString()
+    const cm5 = findCm5()
+    if (cm5?.getValue) return cm5.getValue()
+    const model = findMonaco()
+    if (model?.getValue) return model.getValue()
+    return document.querySelector('.cm-content')?.innerText || ''
+  }
+
+  function accepted(actual) {
+    const got = compact(actual)
+    const want = compact(contentToFill)
+    if (!want) return true
+    if (!got) return false
+    return got.includes(want.slice(0, Math.min(48, want.length)))
+  }
+
+  function setTitle() {
+    const titleInput =
+      document.querySelector('textarea[placeholder*="标题"]') ||
+      document.querySelector('input[placeholder*="标题"]')
+    if (!titleInput || !title) return
     titleInput.focus()
-    const nativeSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement.prototype,
-      'value'
-    ).set
-    nativeSetter.call(titleInput, title)
+    const proto =
+      titleInput instanceof HTMLTextAreaElement
+        ? window.HTMLTextAreaElement.prototype
+        : window.HTMLInputElement.prototype
+    const nativeSetter = Object.getOwnPropertyDescriptor(proto, 'value')?.set
+    if (nativeSetter) nativeSetter.call(titleInput, title)
+    else titleInput.value = title
     titleInput.dispatchEvent(new Event('input', { bubbles: true }))
     titleInput.dispatchEvent(new Event('change', { bubbles: true }))
-    console.log('[COSE] TencentCloud 标题填充成功')
   }
 
-  // 第四步：填充内容到 CodeMirror
-  codeMirror.setValue(contentToFill)
-  console.log('[COSE] TencentCloud 内容填充成功')
+  async function switchToMarkdown() {
+    const controls = document.querySelectorAll('a, button, .header-btn, .switch-editor')
+    for (const el of controls) {
+      if (!isSwitch(el)) continue
+      if (el.tagName === 'A') {
+        el.addEventListener('click', event => event.preventDefault(), { capture: true, once: true })
+      }
+      el.click()
+      console.log('[COSE] TencentCloud 切换到 Markdown 编辑器')
+      await sleep(1200)
+      return true
+    }
+    return false
+  }
+
+  async function waitForSurface() {
+    const start = Date.now()
+    while (Date.now() - start < 8000) {
+      if (
+        findCm6() ||
+        findCm5() ||
+        findMonaco() ||
+        document.querySelector('.cm-content, .cherry-editor, .CodeMirror')
+      ) {
+        return true
+      }
+      await sleep(200)
+    }
+    return false
+  }
+
+  console.log('[COSE] TencentCloud 开始同步...')
+  await sleep(800)
+  await switchToMarkdown()
+  if (!(await waitForSurface())) {
+    return { success: false, error: '未找到腾讯云 Markdown 编辑器' }
+  }
+
+  setTitle()
+
+  const cm6 = findCm6()
+  if (cm6) {
+    cm6.focus?.()
+    cm6.dispatch({
+      changes: { from: 0, to: cm6.state.doc.length, insert: contentToFill },
+    })
+    const actual = cm6.state.doc.toString()
+    if (accepted(actual)) {
+      console.log('[COSE] TencentCloud CodeMirror 6 已写入', actual.length)
+      return { success: true, mode: 'cm6', length: actual.length }
+    }
+  }
+
+  const cm5 = findCm5()
+  if (cm5) {
+    cm5.setValue(contentToFill)
+    cm5.refresh?.()
+    const actual = cm5.getValue?.() || ''
+    if (accepted(actual)) {
+      console.log('[COSE] TencentCloud CodeMirror 5 已写入', actual.length)
+      return { success: true, mode: 'cm5', length: actual.length }
+    }
+  }
+
+  const model = findMonaco()
+  if (model?.setValue) {
+    model.setValue(contentToFill)
+    const actual = model.getValue() || ''
+    if (accepted(actual)) {
+      console.log('[COSE] TencentCloud Monaco 已写入', actual.length)
+      return { success: true, mode: 'monaco', length: actual.length }
+    }
+  }
+
+  const fileInput = document.querySelector(
+    'input[type="file"][accept*=".md"], input[type="file"][accept*="markdown"]'
+  )
+  if (fileInput && contentToFill) {
+    try {
+      const file = new File([contentToFill], 'article.md', { type: 'text/markdown' })
+      const transfer = new DataTransfer()
+      transfer.items.add(file)
+      fileInput.files = transfer.files
+      fileInput.dispatchEvent(new Event('input', { bubbles: true }))
+      fileInput.dispatchEvent(new Event('change', { bubbles: true }))
+      const started = Date.now()
+      while (Date.now() - started < 3000) {
+        await sleep(200)
+        const actual = readBody()
+        if (accepted(actual)) {
+          console.log('[COSE] TencentCloud 导入 Markdown 已写入')
+          return { success: true, mode: 'file', length: compact(actual).length }
+        }
+      }
+    } catch (err) {
+      console.log('[COSE] TencentCloud 导入 Markdown 失败:', err.message || err)
+    }
+  }
+
+  const editable =
+    document.querySelector('.cm-content') ||
+    [...document.querySelectorAll('[contenteditable="true"]')].at(-1)
+  if (editable && contentToFill) {
+    editable.focus()
+    try {
+      const dt = new DataTransfer()
+      dt.setData('text/plain', contentToFill)
+      editable.dispatchEvent(
+        new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dt,
+        })
+      )
+    } catch (err) {
+      console.log('[COSE] TencentCloud 粘贴失败:', err.message || err)
+    }
+    await sleep(400)
+    const actual = readBody()
+    if (accepted(actual)) {
+      console.log('[COSE] TencentCloud 粘贴已写入')
+      return { success: true, mode: 'paste', length: compact(actual).length }
+    }
+  }
+
+  console.error('[COSE] TencentCloud 编辑器没有接住正文')
+  return { success: false, error: '腾讯云编辑器没有接住正文' }
 }
 
-// 导出
-export { TencentCloudPlatform, fillTencentCloudContent, ensureMarkdownEditor, getCodeMirror }
+async function syncTencentCloudContent(tab, content, helpers) {
+  const { waitForTab } = helpers
+  if (!tab?.id) return { success: false, message: '无效的标签页' }
+
+  try {
+    await waitForTab(tab.id)
+
+    try {
+      const current = await chrome.tabs.get(tab.id)
+      if (current?.url && (current.url.includes('/login') || current.url.includes('signin'))) {
+        return { success: false, message: '腾讯云未登录或登录已过期', tabId: tab.id }
+      }
+    } catch (err) {
+      console.log('[COSE] 检查腾讯云 URL 失败:', err.message || err)
+    }
+
+    try {
+      await chrome.tabs.update(tab.id, { active: true })
+      await new Promise(resolve => setTimeout(resolve, 400))
+    } catch (err) {
+      console.log('[COSE] 激活腾讯云标签页失败:', err.message || err)
+    }
+
+    const [result] = await globalThis.chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: fillTencentCloudContent,
+      args: [content?.title || '', content?.markdown || content?.body || ''],
+      world: 'MAIN',
+    })
+    const filled = result?.result
+    if (!filled?.success) {
+      return {
+        success: false,
+        message: filled?.error || '未找到腾讯云 Markdown 编辑器',
+        tabId: tab.id,
+      }
+    }
+    return { success: true, message: '已写入腾讯云 Markdown 编辑器', tabId: tab.id }
+  } catch (err) {
+    console.error('[COSE] 腾讯云同步异常:', err)
+    return {
+      success: false,
+      message: '腾讯云同步失败: ' + (err.message || String(err)),
+      tabId: tab.id,
+    }
+  }
+}
+
+export { TencentCloudPlatform, fillTencentCloudContent, syncTencentCloudContent }

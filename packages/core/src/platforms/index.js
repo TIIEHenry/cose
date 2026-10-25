@@ -16,7 +16,7 @@ import { InfoQPlatform } from './infoq.js'
 import { JianshuPlatform } from './jianshu.js'
 import { BaijiahaoPlatform } from './baijiahao.js'
 import { WangyihaoPlatform, syncWangyihaoContent } from './wangyihao.js'
-import { TencentCloudPlatform } from './tencentcloud.js'
+import { TencentCloudPlatform, syncTencentCloudContent } from './tencentcloud.js'
 import { MediumPlatform } from './medium.js'
 import { SspaiPlatform } from './sspai.js'
 import { SohuPlatform } from './sohu.js'
@@ -117,6 +117,7 @@ const SYNC_HANDLERS = {
   zhihu: syncZhihuContent,
   toutiao: syncToutiaoContent,
   wangyihao: syncWangyihaoContent,
+  tencentcloud: syncTencentCloudContent,
 }
 
 // 导出

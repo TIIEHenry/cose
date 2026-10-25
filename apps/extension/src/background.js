@@ -3827,82 +3827,10 @@ function fillContentOnPage(content, platformId) {
         console.log('[COSE] 简书未找到编辑器')
       }
     }
-    // 腾讯云开发者社区
+    // 腾讯云由 syncTencentCloudContent 处理。这里不再用 CodeMirror 5 的 setValue。
     else if (host.includes('cloud.tencent.com')) {
-      console.log('[COSE] TencentCloud 开始同步...')
-
-      // 等待页面加载
-      await new Promise(resolve => setTimeout(resolve, 1500))
-
-      /**
-       * 第一步：确保进入 MD 编辑器模式
-       * 检查是否有"切换 MD 编辑器"按钮：
-       * - 如果有，说明当前是富文本编辑器，需要点击切换
-       * - 如果没有（显示"切换 富文本 编辑器"），说明已经是 MD 编辑器
-       */
-      const headerBtns = document.querySelectorAll('.header-btn')
-      let needSwitch = false
-      let switchBtn = null
-
-      for (const btn of headerBtns) {
-        if (btn.textContent.includes('切换') && btn.textContent.includes('MD')) {
-          needSwitch = true
-          switchBtn = btn
-          break
-        }
-      }
-
-      if (needSwitch && switchBtn) {
-        console.log('[COSE] TencentCloud 检测到富文本编辑器，正在切换到 MD 编辑器...')
-        switchBtn.click()
-        // 等待切换完成和 CodeMirror 加载
-        await new Promise(resolve => setTimeout(resolve, 2000))
-      } else {
-        console.log('[COSE] TencentCloud 当前已是 MD 编辑器')
-      }
-
-      /**
-       * 第二步：等待 CodeMirror 加载完成
-       */
-      let codeMirror = null
-      const maxWait = 5000
-      const startTime = Date.now()
-
-      while (Date.now() - startTime < maxWait) {
-        const cm = document.querySelector('.CodeMirror')
-        if (cm && cm.CodeMirror) {
-          codeMirror = cm.CodeMirror
-          break
-        }
-        await new Promise(resolve => setTimeout(resolve, 200))
-      }
-
-      if (!codeMirror) {
-        console.error('[COSE] TencentCloud 错误：CodeMirror 未加载，请刷新页面后重试')
-        return
-      }
-
-      /**
-       * 第三步：填充标题
-       */
-      const titleInput = document.querySelector('textarea[placeholder*="标题"]')
-      if (titleInput && title) {
-        titleInput.focus()
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-          window.HTMLTextAreaElement.prototype,
-          'value'
-        ).set
-        nativeSetter.call(titleInput, title)
-        titleInput.dispatchEvent(new Event('input', { bubbles: true }))
-        titleInput.dispatchEvent(new Event('change', { bubbles: true }))
-        console.log('[COSE] TencentCloud 标题填充成功')
-      }
-
-      /**
-       * 第四步：填充内容到 CodeMirror
-       */
-      codeMirror.setValue(contentToFill)
-      console.log('[COSE] TencentCloud 内容填充成功')
+      console.error('[COSE] TencentCloud 应走专用同步处理器')
+      return { success: false, error: '腾讯云同步未走专用处理器' }
     }
     // Medium
     else if (host.includes('medium.com')) {

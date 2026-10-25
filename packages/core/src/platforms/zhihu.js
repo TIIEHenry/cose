@@ -11,6 +11,67 @@ const ZhihuPlatform = {
 
 import { injectUtils } from './common.js'
 
+/** Column editor for a saved draft. Empty when `id` is not a Zhihu article id. */
+export function zhihuDraftEditUrl(id) {
+  const clean = String(id || '').trim()
+  if (!/^\d+$/.test(clean)) return ''
+  return `https://zhuanlan.zhihu.com/p/${clean}/edit`
+}
+
+/** Article id from a column edit URL. A public `/p/{id}` link is not an editor. */
+export function zhihuArticleIdFromUrl(url) {
+  const match = String(url || '').match(/zhuanlan\.zhihu\.com\/p\/(\d+)\/edit(?:[?#]|$)/)
+  return match?.[1] || ''
+}
+
+/**
+ * Reopen the draft only when the visible editor has no body.
+ * Zhihu can store the parsed article on the draft while the editor stays blank.
+ */
+export function zhihuEditorLooksEmpty(text) {
+  const normalized = String(text || '')
+    .replace(/\u200b/g, '')
+    .replace(/\s+/g, '')
+  if (!normalized) return true
+  return normalized === '请输入正文' || normalized === '请输入正文...' || normalized === '写点什么'
+}
+
+export function zhihuEditorRecovery({ editorText, articleId, pageUrl } = {}) {
+  const id = String(articleId || '').trim() || zhihuArticleIdFromUrl(pageUrl)
+  const draftLink = zhihuDraftEditUrl(id)
+  if (!draftLink || !zhihuEditorLooksEmpty(editorText)) {
+    return { draftLink, reopen: false }
+  }
+  return { draftLink, reopen: true }
+}
+
+/** Read the editor after fill. Runs in the page; must not close over module helpers. */
+function readZhihuEditorStateInPage() {
+  const editor =
+    document.querySelector('.public-DraftEditor-content') ||
+    document.querySelector('.DraftEditor-root [contenteditable="true"]') ||
+    document.querySelector('[contenteditable="true"]')
+  const editorText = (editor?.innerText || '').replace(/\u200b/g, '').trim()
+  let articleId = window.__coseZhihuArticleId || ''
+  if (!articleId) {
+    const fromLoc = location.href.match(/zhuanlan\.zhihu\.com\/p\/(\d+)\/edit/)
+    if (fromLoc) articleId = fromLoc[1]
+  }
+  if (!articleId) {
+    const entries = performance.getEntriesByType?.('resource') || []
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const name = entries[i].name || ''
+      if (/\/images|upload\.zhihu|\/upload/i.test(name)) continue
+      const match = name.match(/\/api\/(?:v4\/)?articles\/(\d+)(?:\/|$|\?)/)
+      if (match) {
+        articleId = match[1]
+        break
+      }
+    }
+  }
+  return { editorText, articleId, href: location.href }
+}
+
 // 知乎内容填充函数（在页面主世界中执行）
 // 知乎现在支持直接粘贴 Markdown，然后弹窗提示转换
 // 注意：需要先调用 injectUtils 注入 window.waitFor
@@ -37,17 +98,104 @@ function fillZhihuContent(title, markdown) {
     })
   }
 
-  // 等待按钮出现并点击
+  function noteZhihuArticleUrl(url) {
+    const text = String(url || '')
+    if (/\/images|upload\.zhihu|\/upload/i.test(text)) return
+    const match = text.match(/\/api\/(?:v4\/)?articles\/(\d+)(?:\/|$|\?)/)
+    if (match) window.__coseZhihuArticleId = match[1]
+  }
+
+  function noteZhihuDraftBody(url, bodyText) {
+    noteZhihuArticleUrl(url)
+    if (window.__coseZhihuArticleId) return
+    if (!/\/articles\/drafts(?:\?|$)/.test(String(url || ''))) return
+    try {
+      const data = JSON.parse(bodyText || '')
+      const id = data?.id ?? data?.data?.id
+      if (id != null && /^\d+$/.test(String(id))) window.__coseZhihuArticleId = String(id)
+    } catch {
+      // 创建草稿的响应不是 JSON 时，后面的更新请求仍会带上 id
+    }
+  }
+
+  function installZhihuTrafficHook() {
+    if (window.__coseZhihuTrafficHooked) return
+    window.__coseZhihuTrafficHooked = true
+    const originalFetch = window.fetch
+    window.fetch = function (...args) {
+      const input = args[0]
+      const url = typeof input === 'string' ? input : input?.url || ''
+      return originalFetch.apply(this, args).then(response => {
+        noteZhihuArticleUrl(url)
+        if (!window.__coseZhihuArticleId && /\/articles\/drafts(?:\?|$)/.test(url)) {
+          response
+            .clone()
+            .text()
+            .then(text => noteZhihuDraftBody(url, text))
+            .catch(() => {})
+        }
+        return response
+      })
+    }
+    const originalOpen = XMLHttpRequest.prototype.open
+    const originalSend = XMLHttpRequest.prototype.send
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      this.__coseZhihuUrl = url
+      return originalOpen.apply(this, [method, url, ...rest])
+    }
+    XMLHttpRequest.prototype.send = function (...args) {
+      const url = this.__coseZhihuUrl
+      if (url) {
+        this.addEventListener('loadend', () => {
+          noteZhihuDraftBody(url, this.responseText)
+        })
+      }
+      return originalSend.apply(this, args)
+    }
+  }
+
+  function zhihuEditorElement() {
+    return (
+      document.querySelector('.public-DraftEditor-content') ||
+      document.querySelector('.DraftEditor-root [contenteditable="true"]') ||
+      document.querySelector('[contenteditable="true"]')
+    )
+  }
+
+  function zhihuEditorPlainText() {
+    return (zhihuEditorElement()?.innerText || '').replace(/\u200b/g, '').trim()
+  }
+
+  function zhihuArticleIdFromPage() {
+    if (window.__coseZhihuArticleId) return String(window.__coseZhihuArticleId)
+    const fromLoc = location.href.match(/zhuanlan\.zhihu\.com\/p\/(\d+)\/edit/)
+    if (fromLoc) return fromLoc[1]
+    const entries = performance.getEntriesByType?.('resource') || []
+    for (let i = entries.length - 1; i >= 0; i -= 1) {
+      const name = entries[i].name || ''
+      if (/\/images|upload\.zhihu|\/upload/i.test(name)) continue
+      const match = name.match(/\/api\/(?:v4\/)?articles\/(\d+)(?:\/|$|\?)/)
+      if (match) return match[1]
+    }
+    return ''
+  }
+
+  // 等待按钮出现并点击。textMatcher 收到去掉空白后的按钮文字。
   async function waitAndClickButton(textMatcher, timeout = 5000) {
     const startTime = Date.now()
     while (Date.now() - startTime < timeout) {
-      const buttons = document.querySelectorAll('button')
-      for (const btn of buttons) {
-        if (textMatcher(btn.textContent)) {
-          btn.click()
-          console.log('[COSE] 已点击按钮:', btn.textContent)
-          return true
-        }
+      const buttons = [...document.querySelectorAll('button, [role="button"]')]
+      const matches = buttons.filter(btn =>
+        textMatcher((btn.textContent || '').replace(/\s+/g, ''), btn)
+      )
+      const inDialog = matches.find(btn =>
+        btn.closest('[role="dialog"], [class*="Modal"], [class*="modal"]')
+      )
+      const btn = inDialog || matches[0]
+      if (btn) {
+        btn.click()
+        console.log('[COSE] 已点击按钮:', (btn.textContent || '').replace(/\s+/g, ''))
+        return true
       }
       await new Promise(resolve => setTimeout(resolve, 200))
     }
@@ -55,6 +203,8 @@ function fillZhihuContent(title, markdown) {
   }
 
   async function fillContent() {
+    installZhihuTrafficHook()
+
     // 第一步：等待知乎编辑器完全加载（避免"草稿加载中"提示）
     await new Promise(resolve => setTimeout(resolve, 2000))
 
@@ -86,17 +236,7 @@ function fillZhihuContent(title, markdown) {
     await new Promise(resolve => setTimeout(resolve, 500))
 
     // 第三步：找到并激活知乎编辑器
-    const editorSelectors = [
-      '.public-DraftEditor-content',
-      '[contenteditable="true"]',
-      '.DraftEditor-root',
-    ]
-
-    let editor = null
-    for (const selector of editorSelectors) {
-      editor = document.querySelector(selector)
-      if (editor) break
-    }
+    const editor = zhihuEditorElement()
 
     if (!editor) {
       console.log('[COSE] 未找到知乎编辑器')
@@ -121,19 +261,13 @@ function fillZhihuContent(title, markdown) {
       editor.dispatchEvent(event)
     }
 
-    // 聚焦编辑器
+    // 聚焦编辑器。先不清空：粘贴没落到 Draft.js 时，清空会把已加载的草稿从画面上抹掉。
     editor.focus()
-
-    // 清空现有内容
-    document.execCommand('selectAll', false)
-    document.execCommand('delete', false)
-
-    // 等待编辑器状态更新
-    await new Promise(resolve => setTimeout(resolve, 100))
 
     // 第三步：通过剪贴板 + 键盘事件模拟真实粘贴
     // 这是触发知乎 Markdown 检测弹窗的关键方法
     const contentToFill = markdown || ''
+    let parsed = false
 
     if (!contentToFill) {
       console.log('[COSE] 没有 Markdown 内容需要填充')
@@ -166,15 +300,26 @@ function fillZhihuContent(title, markdown) {
       // 等待 Markdown 检测弹窗出现并点击"确认并解析"
       await new Promise(resolve => setTimeout(resolve, 500))
 
-      const parseClicked = await waitAndClickButton(text => text.includes('确认并解析'), 5000)
+      parsed = await waitAndClickButton(text => text.includes('确认并解析'), 5000)
 
-      if (parseClicked) {
+      if (parsed) {
         console.log('[COSE] 已点击"确认并解析"')
 
         // 等待解析完成并点击"确认"
         await new Promise(resolve => setTimeout(resolve, 500))
 
-        const confirmClicked = await waitAndClickButton(text => text === '确认', 5000)
+        const confirmClicked = await waitAndClickButton((text, btn) => {
+          if (text !== '确认' && text !== '确定') return false
+          const dialog = btn.closest('[role="dialog"], [class*="Modal"], [class*="modal"]')
+          if (!dialog) return true
+          const hint = (dialog.textContent || '').replace(/\s+/g, '')
+          return (
+            hint.includes('解析') ||
+            hint.includes('Markdown') ||
+            hint.includes('markdown') ||
+            hint.includes('富文本')
+          )
+        }, 5000)
 
         if (confirmClicked) {
           console.log('[COSE] 已点击"确认"，Markdown 解析完成')
@@ -186,10 +331,27 @@ function fillZhihuContent(title, markdown) {
       console.log('[COSE] 内容插入失败:', err.message || err)
     }
 
+    // 弹窗没出现时，Draft.js 经常丢掉非可信 paste。这时再写入正文，避免编辑器被留空。
+    if (!parsed) {
+      editor.focus()
+      document.execCommand('selectAll', false)
+      document.execCommand('delete', false)
+      await new Promise(resolve => setTimeout(resolve, 50))
+      const inserted = document.execCommand('insertText', false, contentToFill)
+      console.log('[COSE] 知乎未解析 Markdown，已 insertText:', inserted)
+    }
+
     // 等待内容渲染
     await new Promise(resolve => setTimeout(resolve, 300))
 
-    return { success: true, method: 'paste-markdown' }
+    return {
+      success: true,
+      method: parsed ? 'paste-markdown' : 'insert-text',
+      parsed,
+      articleId: zhihuArticleIdFromPage(),
+      editorText: zhihuEditorPlainText(),
+      href: location.href,
+    }
   }
 
   return fillContent()
@@ -261,13 +423,52 @@ async function syncZhihuContent(tab, content, helpers) {
       return { success: false, message: errorMsg, tabId: tab.id }
     }
 
-    // 等待 2 秒确保内容在编辑器中解析稳定并触发知乎草稿保存
-    await new Promise(resolve => setTimeout(resolve, 2000))
+    let articleId = fillResult.articleId || ''
+    let editorText = fillResult.editorText || ''
+    let pageUrl = fillResult.href || ''
+    let reopened = false
 
-    // 仅在正文确实含图时才监听图片上传
+    // 画面仍是空的、草稿里还有正文：尽快打开该草稿，避免空编辑器的自动保存把草稿盖掉。
+    if (zhihuEditorLooksEmpty(editorText)) {
+      await new Promise(resolve => setTimeout(resolve, 800))
+      try {
+        const [read] = await globalThis.chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: readZhihuEditorStateInPage,
+          world: 'MAIN',
+        })
+        const state = read?.result || {}
+        articleId = state.articleId || articleId
+        editorText = state.editorText ?? editorText
+        pageUrl = state.href || pageUrl
+      } catch (err) {
+        console.log('[COSE] 读取知乎编辑器失败:', err.message || err)
+      }
+
+      const recovery = zhihuEditorRecovery({ editorText, articleId, pageUrl })
+      if (recovery.reopen && recovery.draftLink) {
+        try {
+          const current = (await chrome.tabs.get(tab.id)).url || ''
+          const same = current.split(/[?#]/)[0] === recovery.draftLink
+          if (same) await chrome.tabs.reload(tab.id)
+          else await chrome.tabs.update(tab.id, { url: recovery.draftLink, active: true })
+          await waitForTab(tab.id)
+          pageUrl = recovery.draftLink
+          reopened = true
+          console.log('[COSE] 知乎编辑器为空，已打开草稿', recovery.draftLink)
+        } catch (err) {
+          console.log('[COSE] 打开知乎草稿失败:', err.message || err)
+        }
+      }
+    } else {
+      // 等待内容在编辑器中稳定并触发知乎草稿保存
+      await new Promise(resolve => setTimeout(resolve, 2000))
+    }
+
+    // 重新打开草稿后，这一页的上传监听已经不在了；有正文时才等图片。
     const hasImages =
       /!\[.*?\]\(.*?\)/.test(content.markdown || '') || /<img/i.test(content.body || '')
-    if (hasImages) {
+    if (hasImages && !reopened) {
       console.log('[COSE] 检测到 Markdown 包含图片，开始监听图片上传请求...')
       try {
         await waitForImageUploadComplete(tab.id, 8000)
@@ -276,7 +477,14 @@ async function syncZhihuContent(tab, content, helpers) {
       }
     }
 
-    return { success: true, message: '已写入知乎专栏草稿', tabId: tab.id }
+    const draftLink =
+      zhihuDraftEditUrl(articleId) || zhihuDraftEditUrl(zhihuArticleIdFromUrl(pageUrl))
+    return {
+      success: true,
+      message: reopened ? '已写入知乎草稿，并重新打开编辑器' : '已写入知乎专栏草稿',
+      tabId: tab.id,
+      editResp: draftLink ? { draftLink } : undefined,
+    }
   } catch (err) {
     console.error('[COSE] 知乎同步异常:', err)
     return {
