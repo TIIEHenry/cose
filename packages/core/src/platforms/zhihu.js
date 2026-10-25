@@ -206,58 +206,84 @@ function fillZhihuContent(title, markdown) {
 async function syncZhihuContent(tab, content, helpers) {
   const { waitForTab } = helpers
 
-  // 等待页面加载完成（waitForTab 使用 chrome.tabs.onUpdated 监听）
-  await waitForTab(tab.id)
-
-  // 激活知乎标签页（避免后台标签页限制导致填充失败）
   try {
-    await chrome.tabs.update(tab.id, { active: true })
-    console.log('[COSE] 已激活知乎标签页')
-    // 等待标签页激活完成
-    await new Promise(resolve => setTimeout(resolve, 500))
-  } catch (err) {
-    console.log('[COSE] 激活标签页失败:', err.message || err)
-  }
-
-  // 先注入公共工具函数（waitFor 使用 MutationObserver）
-  await injectUtils(globalThis.chrome, tab.id)
-
-  // 在页面中执行内容填充
-  const result = await globalThis.chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: fillZhihuContent,
-    args: [content.title, content.markdown],
-    world: 'MAIN',
-  })
-
-  const fillResult = result?.[0]?.result
-  if (fillResult?.success) {
-    // 等待 2 秒确保内容已保存
-    await new Promise(resolve => setTimeout(resolve, 2000))
-
-    // 等待图片上传完成后再刷新
-    console.log('[COSE] 开始监听图片上传请求...')
-    const uploadComplete = await waitForImageUploadComplete(tab.id)
-
-    if (uploadComplete) {
-      console.log('[COSE] 图片上传完成，准备刷新页面')
-      try {
-        if (chrome?.tabs && tab?.id) {
-          await chrome.tabs.reload(tab.id, { bypassCache: false })
-          console.log('[COSE] 已模拟用户刷新知乎页面')
-        } else {
-          console.log('[COSE] chrome.tabs 或 tab.id 不可用，跳过刷新')
-        }
-      } catch (err) {
-        console.log('[COSE] 刷新页面失败:', err.message || err)
-      }
-    } else {
-      console.log('[COSE] 未检测到图片上传请求或超时，跳过刷新')
+    if (!tab?.id) {
+      return { success: false, message: '无效的标签页' }
     }
 
-    return { success: true, message: '已打开知乎并同步内容', tabId: tab.id }
-  } else {
-    return { success: false, message: fillResult?.error || '内容同步失败', tabId: tab.id }
+    // 等待页面加载完成（waitForTab 使用 chrome.tabs.onUpdated 监听）
+    await waitForTab(tab.id)
+
+    // 检查是否被重定向到登录页
+    try {
+      const currentTab = await chrome.tabs.get(tab.id)
+      if (
+        currentTab?.url &&
+        (currentTab.url.includes('signin') || currentTab.url.includes('login'))
+      ) {
+        return {
+          success: false,
+          message: '知乎未登录或登录已过期，请在知乎页面登录后重试',
+          tabId: tab.id,
+        }
+      }
+    } catch (e) {
+      console.log('[COSE] 检查知乎 URL 失败:', e.message)
+    }
+
+    // 激活知乎标签页（避免后台标签页限制导致填充失败）
+    try {
+      await chrome.tabs.update(tab.id, { active: true })
+      console.log('[COSE] 已激活知乎标签页')
+      // 等待标签页激活完成
+      await new Promise(resolve => setTimeout(resolve, 500))
+    } catch (err) {
+      console.log('[COSE] 激活标签页失败:', err.message || err)
+    }
+
+    // 先注入公共工具函数（waitFor 使用 MutationObserver）
+    await injectUtils(globalThis.chrome, tab.id)
+
+    // 在页面中执行内容填充
+    const result = await globalThis.chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: fillZhihuContent,
+      args: [content.title, content.markdown],
+      world: 'MAIN',
+    })
+
+    const fillResult = result?.[0]?.result
+    if (!fillResult?.success) {
+      const errorMsg =
+        fillResult?.error === 'Editor not found'
+          ? '未找到知乎专栏编辑器（可能未登录或被滑块验证拦截）'
+          : fillResult?.error || '知乎内容同步失败'
+      return { success: false, message: errorMsg, tabId: tab.id }
+    }
+
+    // 等待 2 秒确保内容在编辑器中解析稳定并触发知乎草稿保存
+    await new Promise(resolve => setTimeout(resolve, 2000))
+
+    // 仅在正文确实含图时才监听图片上传
+    const hasImages =
+      /!\[.*?\]\(.*?\)/.test(content.markdown || '') || /<img/i.test(content.body || '')
+    if (hasImages) {
+      console.log('[COSE] 检测到 Markdown 包含图片，开始监听图片上传请求...')
+      try {
+        await waitForImageUploadComplete(tab.id, 8000)
+      } catch (err) {
+        console.log('[COSE] 等待图片上传异常 (非致命):', err.message || err)
+      }
+    }
+
+    return { success: true, message: '已写入知乎专栏草稿', tabId: tab.id }
+  } catch (err) {
+    console.error('[COSE] 知乎同步异常:', err)
+    return {
+      success: false,
+      message: '知乎同步失败: ' + (err.message || String(err)),
+      tabId: tab.id,
+    }
   }
 }
 
@@ -267,75 +293,65 @@ async function syncZhihuContent(tab, content, helpers) {
  * @param {number} timeout - 超时时间（毫秒）
  * @returns {Promise<boolean>}
  */
-async function waitForImageUploadComplete(tabId, timeout = 30000) {
-  const startTime = Date.now()
-
+async function waitForImageUploadComplete(tabId, timeout = 8000) {
   // 在页面中注入监听脚本
   const result = await globalThis.chrome.scripting.executeScript({
     target: { tabId: tabId },
-    func: () => {
+    func: listenTimeout => {
       return new Promise(resolve => {
-        const pendingUploads = new Map() // uploadId -> { url, completed }
+        const pendingUploads = new Set()
         let hasUploadRequests = false
         let lastUploadTime = 0
+        let reqSeq = 0
 
-        // 检查是否所有上传都完成
-        const checkAllComplete = () => {
-          if (pendingUploads.size === 0) return false
-
-          for (const [id, info] of pendingUploads) {
-            if (!info.completed) return false
+        const isUploadUrl = url => {
+          if (!url || typeof url !== 'string') return false
+          // 排除心跳、打点、草稿保存等常规 POST，避免误判
+          if (
+            url.includes('/api/v4/draft') ||
+            url.includes('/api/v4/reporter') ||
+            url.includes('/api/v4/growth') ||
+            url.includes('/api/v4/tracking') ||
+            url.includes('/api/v4/me') ||
+            url.includes('/api/v4/messages')
+          ) {
+            return false
           }
-          return true
+          return (
+            url.includes('/api/v4/images') ||
+            url.includes('/api/v4/upload') ||
+            url.includes('upload.zhihu.com')
+          )
         }
 
         // 监听 fetch 请求
         const originalFetch = window.fetch
         window.fetch = function (...args) {
           const url = args[0]
-          const options = args[1] || {}
-
-          // 检测图片上传请求（知乎的图片上传通常包含这些特征）
-          const isImageUpload =
-            typeof url === 'string' &&
-            (url.includes('/api/v4/images') ||
-              url.includes('/api/v4/upload') ||
-              url.includes('upload') ||
-              (options.method === 'POST' && url.includes('zhihu.com')))
+          const isImageUpload = isUploadUrl(url)
+          let uploadId
 
           if (isImageUpload) {
             hasUploadRequests = true
             lastUploadTime = Date.now()
-            const uploadId = Date.now() + Math.random()
-            pendingUploads.set(uploadId, { url, completed: false })
+            uploadId = ++reqSeq
+            pendingUploads.add(uploadId)
             console.log('[COSE] 检测到图片上传请求:', url, uploadId)
           }
 
           return originalFetch
             .apply(this, args)
             .then(response => {
-              if (isImageUpload) {
+              if (uploadId) {
                 console.log('[COSE] 图片上传请求完成:', url, response.status)
-                // 标记为已完成
-                for (const [id, info] of pendingUploads) {
-                  if (info.url === url) {
-                    info.completed = true
-                    break
-                  }
-                }
+                pendingUploads.delete(uploadId)
               }
               return response
             })
             .catch(error => {
-              if (isImageUpload) {
+              if (uploadId) {
                 console.log('[COSE] 图片上传请求失败:', url, error)
-                // 即使失败也标记为已完成（有反馈结果）
-                for (const [id, info] of pendingUploads) {
-                  if (info.url === url) {
-                    info.completed = true
-                    break
-                  }
-                }
+                pendingUploads.delete(uploadId)
               }
               throw error
             })
@@ -352,29 +368,19 @@ async function waitForImageUploadComplete(tabId, timeout = 30000) {
         }
 
         XMLHttpRequest.prototype.send = function (...args) {
-          const isImageUpload =
-            this._url &&
-            (this._url.includes('/api/v4/images') ||
-              this._url.includes('/api/v4/upload') ||
-              this._url.includes('upload') ||
-              (this._method === 'POST' && this._url.includes('zhihu.com')))
+          const isImageUpload = isUploadUrl(this._url)
+          let uploadId
 
           if (isImageUpload) {
             hasUploadRequests = true
             lastUploadTime = Date.now()
-            const uploadId = Date.now() + Math.random()
-            pendingUploads.set(uploadId, { url: this._url, completed: false })
+            uploadId = ++reqSeq
+            pendingUploads.add(uploadId)
             console.log('[COSE] 检测到图片上传 XHR:', this._url, uploadId)
 
             this.addEventListener('loadend', () => {
               console.log('[COSE] 图片上传 XHR 完成:', this._url, this.status)
-              // 标记为已完成
-              for (const [id, info] of pendingUploads) {
-                if (info.url === this._url) {
-                  info.completed = true
-                  break
-                }
-              }
+              pendingUploads.delete(uploadId)
             })
           }
 
@@ -383,51 +389,37 @@ async function waitForImageUploadComplete(tabId, timeout = 30000) {
 
         // 定期检查是否所有上传都完成
         const checkTimer = setInterval(() => {
-          // 如果没有检测到任何上传请求，说明可能没有图片需要上传
           if (!hasUploadRequests) {
-            console.log('[COSE] 未检测到图片上传请求')
-            clearInterval(checkTimer)
-            resolve(true)
             return
           }
-
-          // 如果所有上传都完成，并且距离最后一个上传请求已经过去2秒（确保没有新请求）
-          if (checkAllComplete() && Date.now() - lastUploadTime > 2000) {
+          if (pendingUploads.size === 0 && Date.now() - lastUploadTime > 1500) {
             console.log('[COSE] 所有图片上传请求已完成')
             clearInterval(checkTimer)
             resolve(true)
-            return
           }
-        }, 500)
+        }, 400)
 
-        // 10秒后如果没有检测到上传请求，认为没有图片需要上传
+        // 2.5 秒内未检测到任何上传请求，说明无需等待
         setTimeout(() => {
           if (!hasUploadRequests) {
-            console.log('[COSE] 10秒内未检测到上传请求，认为无图片')
+            console.log('[COSE] 2.5秒内未检测到图片上传请求，结束等待')
             clearInterval(checkTimer)
             resolve(true)
           }
-        }, 10000)
+        }, 2500)
 
-        // 超时后无论如何都返回
+        // 超时保底返回
         setTimeout(() => {
-          console.log('[COSE] 等待图片上传超时')
           clearInterval(checkTimer)
-          resolve(true) // 即使超时也刷新
-        }, timeout)
+          resolve(true)
+        }, listenTimeout)
       })
     },
+    args: [timeout],
     world: 'MAIN',
   })
 
-  // 等待监听结果
-  const uploadResult = result?.[0]?.result
-  console.log('[COSE] 图片上传监听结果:', uploadResult)
-
-  // 给一个额外的缓冲时间，确保图片已经完全加载和渲染
-  await new Promise(resolve => setTimeout(resolve, 2000))
-
-  return uploadResult !== false
+  return result?.[0]?.result !== false
 }
 
 // 导出
