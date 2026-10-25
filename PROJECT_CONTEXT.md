@@ -101,7 +101,7 @@ background.js
 
 - `markdown`：供 Markdown 编辑器使用。
 - `body`：一般正文或 HTML 内容。
-- `wechatHtml`：带 doocs/md 完整渲染样式的 HTML，主要供微信及其他富文本编辑器使用。
+- `wechatHtml`：带完整渲染样式的 HTML，主要供微信及其他富文本编辑器使用。宿主若直接放在 `post.wechatHtml`，扩展用这份内容，不再点复制按钮、不再读剪贴板。没给时才点复制按钮并读取剪贴板，读操作限时，超时后改用 `post.content`，避免再次同步停在「等待中」。
 
 ## 4. 平台同步策略
 

@@ -108,6 +108,44 @@
     })
   }
 
+  function withTimeout(promise, ms, label) {
+    let timer
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(label)), ms)
+    })
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+  }
+
+  // 竞态超时后原 promise 仍可能稍后拒绝；挂上空 catch，避免未处理拒绝。
+  function watchMessage(promise) {
+    promise.catch(() => {})
+    return promise
+  }
+
+  async function readClipboardHtml() {
+    try {
+      if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') return ''
+      const clipboardItems = await withTimeout(
+        watchMessage(navigator.clipboard.read()),
+        3000,
+        'clipboard read timeout'
+      )
+      for (const item of clipboardItems) {
+        if (!item.types.includes('text/html')) continue
+        const blob = await withTimeout(
+          watchMessage(item.getType('text/html')),
+          3000,
+          'clipboard html timeout'
+        )
+        const html = await withTimeout(watchMessage(blob.text()), 3000, 'clipboard text timeout')
+        if (html) return html
+      }
+    } catch (e) {
+      console.log('[COSE] 读取剪贴板失败:', e.message)
+    }
+    return ''
+  }
+
   // 平台配置（与 background.js 保持一致）
   const PLATFORMS = [
     {
@@ -484,10 +522,20 @@
 
       // 依次同步到各平台
       const syncAll = async () => {
-        // 开始新的同步批次，将所有 tab 放入一个 group
-        await sendMessage('START_SYNC_BATCH', {})
+        // 开始新的同步批次，将所有 tab 放入一个 group。
+        // 服务工休眠后第一条消息可能一直不回；这里限时并继续，避免整批停在「等待中」。
+        try {
+          await withTimeout(
+            watchMessage(sendMessage('START_SYNC_BATCH', {})),
+            5000,
+            'start batch timeout'
+          )
+        } catch (e) {
+          console.log('[COSE] 开始同步批次失败:', e.message)
+        }
 
-        // 检查是否需要同步到微信公众号或百家号或网易号或 Medium 或少数派或B站专栏或微博头条或小红书（需要使用剪贴板 HTML）
+        // 微信等富文本编辑器优先用宿主直接给的 HTML。再去点复制按钮、读剪贴板时，
+        // 第二次同步常因剪贴板锁或用户激活过期而永远不返回，进度就停在排队。
         const hasWechat = syncAccounts.some(a => (a.uid || a.type) === 'wechat')
         const hasToutiao = syncAccounts.some(a => (a.uid || a.type) === 'toutiao')
         const hasBaijiahao = syncAccounts.some(a => (a.uid || a.type) === 'baijiahao')
@@ -497,8 +545,7 @@
         const hasBilibili = syncAccounts.some(a => (a.uid || a.type) === 'bilibili')
         const hasWeibo = syncAccounts.some(a => (a.uid || a.type) === 'weibo')
         const hasXiaohongshu = syncAccounts.some(a => (a.uid || a.type) === 'xiaohongshu')
-        let clipboardHtmlContent = null
-        if (
+        const wantsStyledHtml =
           hasWechat ||
           hasToutiao ||
           hasBaijiahao ||
@@ -508,8 +555,8 @@
           hasBilibili ||
           hasWeibo ||
           hasXiaohongshu
-        ) {
-          // 先点击复制按钮，将带样式的内容复制到剪贴板
+        let clipboardHtmlContent = typeof post.wechatHtml === 'string' ? post.wechatHtml : ''
+        if (wantsStyledHtml && !clipboardHtmlContent.trim()) {
           const copyBtn =
             document.querySelector('.copy-btn') ||
             document.querySelector('button[class*="copy"]') ||
@@ -518,24 +565,16 @@
               b.textContent.includes('复制')
             )
           if (copyBtn && typeof copyBtn.click === 'function') {
-            copyBtn.click()
-            // 等待复制完成
-            await new Promise(resolve => setTimeout(resolve, 2000))
-
-            // 读取剪贴板中的 HTML 内容
             try {
-              const clipboardItems = await navigator.clipboard.read()
-              for (const item of clipboardItems) {
-                if (item.types.includes('text/html')) {
-                  const blob = await item.getType('text/html')
-                  clipboardHtmlContent = await blob.text()
-                  console.log('[COSE] 已读取剪贴板 HTML 内容，长度:', clipboardHtmlContent.length)
-                  break
-                }
-              }
+              copyBtn.click()
             } catch (e) {
-              console.log('[COSE] 读取剪贴板失败:', e.message)
+              console.log('[COSE] 点击复制按钮失败:', e.message)
             }
+            await new Promise(resolve => setTimeout(resolve, 2000))
+          }
+          clipboardHtmlContent = await readClipboardHtml()
+          if (clipboardHtmlContent) {
+            console.log('[COSE] 已读取剪贴板 HTML 内容，长度:', clipboardHtmlContent.length)
           }
         }
 
