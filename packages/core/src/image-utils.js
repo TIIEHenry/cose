@@ -55,6 +55,10 @@ function extractAllImageUrls(content) {
   extractImageUrlsFromMarkdown(content.markdown).forEach(url => allUrls.add(url))
   extractImageUrlsFromHtml(content.body).forEach(url => allUrls.add(url))
   extractImageUrlsFromHtml(content.wechatHtml).forEach(url => allUrls.add(url))
+  const thumb = content?.thumb
+  if (thumb && isValidImageUrl(thumb) && !String(thumb).startsWith('data:')) {
+    allUrls.add(thumb)
+  }
   return [...allUrls]
 }
 
@@ -401,6 +405,7 @@ async function replaceImagesViaPaste(tabId, chrome, imageCache) {
 
 // 导出
 export {
+  extractAllImageUrls,
   extractDataUrlImages,
   downloadAllImages,
   serializeImageCache,

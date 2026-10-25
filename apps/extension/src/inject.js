@@ -542,7 +542,7 @@
         for (let i = 0; i < syncAccounts.length; i++) {
           const account = syncAccounts[i]
           status.accounts[i].status = 'uploading'
-          status.accounts[i].msg = '同步中...'
+          status.accounts[i].msg = '正在同步到 ' + (account.title || account.type) + '…'
           if (typeof onProgress === 'function') onProgress({ ...status })
 
           try {
@@ -575,15 +575,19 @@
 
             if (result?.success) {
               status.accounts[i].status = 'done'
-              status.accounts[i].msg = '同步成功'
-              status.accounts[i].editResp = { draftLink: '' }
+              status.accounts[i].msg = result?.message || '同步成功'
+              status.accounts[i].editResp = {
+                draftLink: result?.editResp?.draftLink || '',
+              }
             } else {
               status.accounts[i].status = 'failed'
-              status.accounts[i].error = result?.message || '同步失败'
+              status.accounts[i].error = result?.message || result?.error || '同步失败'
+              status.accounts[i].msg = status.accounts[i].error
             }
           } catch (error) {
             status.accounts[i].status = 'failed'
             status.accounts[i].error = error.message || '同步失败'
+            status.accounts[i].msg = status.accounts[i].error
           }
 
           if (typeof onProgress === 'function') onProgress({ ...status })

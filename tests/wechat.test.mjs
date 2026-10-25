@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import { extractAllImageUrls } from '../packages/core/src/image-utils.js'
 import {
+  applyWechatCoverInPage,
+  applyWechatDigestInPage,
+  coverImageForWechat,
   fillWechatContent,
+  isWechatEditorUrl,
   pickWechatBodyProseMirrorCandidate,
+  wechatEditorUrl,
 } from '../packages/core/src/platforms/wechat.js'
 
 function createEditor({ textContent = '', top = 0, height = 120, width = 640, classes = [] } = {}) {
@@ -236,6 +242,195 @@ test('没有标题编辑器时保留单编辑器场景的兼容性', () => {
 
   const picked = pickWechatBodyProseMirrorCandidate([bodyEditor], {})
   assert.equal(picked, bodyEditor)
+})
+
+test('封面地址优先用已下载的图片，并保留原图 URL', () => {
+  const got = coverImageForWechat(
+    { thumb: 'https://taokdao.com/media/a.jpg' },
+    {
+      'https://taokdao.com/media/a.jpg': {
+        dataUrl: 'data:image/jpeg;base64,YQ==',
+        filename: 'a.jpg',
+        mimeType: 'image/jpeg',
+      },
+    }
+  )
+  assert.equal(got.dataUrl, 'data:image/jpeg;base64,YQ==')
+  assert.equal(got.url, 'https://taokdao.com/media/a.jpg')
+  assert.equal(got.filename, 'a.jpg')
+})
+
+test('裁切后的 data URL 封面不再回落到外链', () => {
+  const got = coverImageForWechat({ thumb: 'data:image/png;base64,YQ==' })
+  assert.equal(got.mimeType, 'image/png')
+  assert.equal(got.filename, 'cover.png')
+  assert.equal(got.url, '')
+  assert.equal(coverImageForWechat({ thumb: '/media/a.jpg' }), null)
+})
+
+test('保存后的文章地址仍是编辑页', () => {
+  const url = wechatEditorUrl('99', '123')
+  assert.equal(isWechatEditorUrl(url), true)
+  assert.match(url, /appmsgid=123/)
+  assert.match(url, /token=99/)
+  assert.equal(isWechatEditorUrl('https://mp.weixin.qq.com/'), false)
+})
+
+test('封面图地址会和正文图片一起下载', () => {
+  const urls = extractAllImageUrls({
+    markdown: '![a](https://cdn.example/a.png)',
+    body: '',
+    wechatHtml: '',
+    thumb: 'https://cdn.example/cover.jpg',
+  })
+  assert.ok(urls.includes('https://cdn.example/a.png'))
+  assert.ok(urls.includes('https://cdn.example/cover.jpg'))
+  assert.deepEqual(
+    extractAllImageUrls({ markdown: '', body: '', thumb: 'data:image/jpeg;base64,YQ==' }),
+    []
+  )
+})
+
+test('摘要写入 120 字输入框，不改动正文编辑器', async () => {
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    Event: globalThis.Event,
+  }
+  const written = []
+  class TestEvent {
+    constructor(type) {
+      this.type = type
+    }
+  }
+  class TextAreaProto {}
+  Object.defineProperty(TextAreaProto.prototype, 'value', {
+    set(value) {
+      written.push(value)
+      this.current = value
+    },
+  })
+  const digest = {
+    tagName: 'TEXTAREA',
+    id: 'js_description',
+    parentElement: null,
+    getAttribute: () => '',
+    closest: () => null,
+    dispatchEvent() {},
+  }
+  const body = {
+    tagName: 'DIV',
+    clientHeight: 480,
+    className: 'ProseMirror',
+    textContent: '正文很长',
+    parentElement: null,
+    getAttribute: () => null,
+    closest(selector) {
+      return selector.includes('ProseMirror') ? body : null
+    },
+    dispatchEvent() {},
+  }
+  const card = {
+    innerText: '0/120',
+    textContent: '0/120',
+    parentElement: null,
+  }
+  const visible = {
+    tagName: 'DIV',
+    parentElement: card,
+    textContent: '',
+    getAttribute: name => (name === 'contenteditable' ? 'true' : ''),
+    closest: () => null,
+    focus() {},
+    dispatchEvent() {},
+  }
+  globalThis.Event = TestEvent
+  globalThis.window = { HTMLTextAreaElement: TextAreaProto, getSelection: () => null }
+  globalThis.document = {
+    createRange: null,
+    execCommand: () => false,
+    querySelectorAll(selector) {
+      if (selector.includes('#js_description')) return [digest]
+      if (selector.includes('maxlength')) return []
+      if (selector.includes('contenteditable')) return [body, visible]
+      return []
+    },
+  }
+
+  try {
+    const lead = '信息、行动与自身维持的组织关系'
+    const result = await applyWechatDigestInPage(`  ${lead}  `)
+    assert.equal(result.success, true)
+    assert.equal(written[0], lead)
+    assert.equal(visible.textContent, lead)
+    assert.equal(body.textContent, '正文很长')
+    assert.equal(result.length, [...lead].length)
+    const clipped = await applyWechatDigestInPage('字'.repeat(130))
+    assert.equal([...(clipped && written.at(-1))].length, 120)
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
+})
+
+test('编辑页凭证齐全时上传封面并调用改封面接口', async () => {
+  const previous = {
+    window: globalThis.window,
+    document: globalThis.document,
+    fetch: globalThis.fetch,
+  }
+  const calls = []
+  globalThis.window = {
+    location: new URL('https://mp.weixin.qq.com/cgi-bin/appmsg?token=77&lang=zh_CN'),
+    __MP_Editor_JSAPI__: {
+      invoke(params) {
+        calls.push(params)
+        params.sucCb({ ok: true })
+      },
+    },
+  }
+  globalThis.document = {
+    querySelectorAll: () => [
+      {
+        textContent: 'var cgi = { ticket: "tk", user_name: "gh_test", time: "1700000000" }',
+      },
+    ],
+  }
+  globalThis.fetch = async (input, init) => {
+    const url = String(input)
+    if (url.startsWith('data:')) {
+      return { blob: async () => new Blob([Uint8Array.from([1, 2, 3])], { type: 'image/jpeg' }) }
+    }
+    assert.equal(init.method, 'POST')
+    assert.match(url, /ticket_id=gh_test/)
+    assert.match(url, /token=77/)
+    return {
+      json: async () => ({
+        cdn_url: 'http://mmbiz.qpic.cn/mmbiz_jpg/cover',
+        base_resp: { err_msg: 'ok' },
+      }),
+    }
+  }
+
+  try {
+    const result = await applyWechatCoverInPage({
+      dataUrl: 'data:image/jpeg;base64,YQ==',
+      url: '',
+      filename: 'cover.jpg',
+      mimeType: 'image/jpeg',
+    })
+    assert.equal(result.success, true)
+    assert.equal(result.url, 'https://mmbiz.qpic.cn/mmbiz_jpg/cover')
+    assert.equal(calls[0].apiName, 'mp_editor_change_cover')
+    assert.deepEqual(calls[0].apiParam, { oriImgUrl: 'https://mmbiz.qpic.cn/mmbiz_jpg/cover' })
+  } finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete globalThis[key]
+      else globalThis[key] = value
+    }
+  }
 })
 
 test('正文填充优先使用微信编辑器 JSAPI 注入含图 HTML', async () => {
